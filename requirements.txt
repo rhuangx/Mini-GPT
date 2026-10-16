@@ -1,0 +1,6 @@
+torch==2.11.0            # model, autograd, bf16 autocast, torch.compile, the FLOP counter in tests
+numpy==2.4.2             # uint16 token files
+tokenizers==0.22.2       # Rust BPE trainer and encoder
+pyarrow==26.0.0          # reads the FineWeb-Edu parquet files
+huggingface-hub==0.35.0  # downloads them
+pytest==9.0.3            # test suite

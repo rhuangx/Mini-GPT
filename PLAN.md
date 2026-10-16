@@ -85,10 +85,12 @@ Build only what Phase 1 needs.
 
 - `tokenizer.py`: byte-level BPE; digits split one per token; special-token
   strings inside text encode as plain text, not as control tokens.
-- `data.py`: stream ClimbMix → train tokenizer → packed uint16 shards. Keep the
+- `data.py`: stream FineWeb-Edu `sample-10BT` (about 10B GPT-2 tokens of raw
+  text) → train tokenizer → packed uint16 shards. Keep the
   held-out val documents as raw text so any tokenizer can be scored on them.
   Fetch enough that no run repeats a document: the smallest model in the 1e18
-  sweep needs about 7B tokens.
+  sweep needs about 7B tokens. If Phase 0 raises the budgets, move to
+  `sample-100BT`.
 - `model.py`: plain PyTorch GPT built from a config.
 - `flops.py`: the FLOPs formula from rule 2.
 - `train.py`: train one config to a FLOP budget with a WSD (warmup, stable,
@@ -167,7 +169,7 @@ Backlog, ordered by expected impact at this scale. Reorder freely.
 | 12 | MLP | SwiGLU ratio, ReLU² | |
 | 13 | Init and stability | output-layer scaling, z-loss | |
 | 14 | GQA | 1, 2, 4 KV heads per group | Mainly an inference saving; check training cost |
-| 15 | Data | ClimbMix vs FineWeb-Edu, quality filtering | Data often beats architecture. Score every variant on one shared held-out set; bpb on different val sets isn't comparable |
+| 15 | Data | FineWeb-Edu vs its looser score-2 version, or ClimbMix | Data often beats architecture. Score every variant on one shared held-out set; bpb on different val sets isn't comparable |
 | 16 | Digit splitting | on, off | Compression vs arithmetic |
 
 **Done when:** every row has an ECM with a confidence interval at 1e16, and
@@ -196,7 +198,3 @@ tests/
 ```
 
 Add a file only when a phase needs it.
-
-## Open questions
-
-1. Data: ClimbMix (current default) or FineWeb-Edu?
