@@ -1,4 +1,4 @@
-"""Phase 0 checks, ordered like the package: tokenizer, data, model, FLOPs, val bpb, resume."""
+"""Checks ordered like the package: tokenizer, data, model, FLOPs, val bpb, resume, scaling fits."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.flop_counter import FlopCounterMode
 
-from mini_gpt import data
+from mini_gpt import data, scaling
 from mini_gpt.flops import flops_per_token
 from mini_gpt.model import GPT, IGNORE_INDEX, GPTConfig
 from mini_gpt.tokenizer import Tokenizer
@@ -178,3 +178,40 @@ def test_resumed_run_reproduces_the_uninterrupted_curve(corpus, tmp_path):
     assert whole["curve"][-1]["train_loss"] < whole["curve"][0]["train_loss"]
     rows = [json.loads(line) for line in (tmp_path / "runs.jsonl").open()]
     assert [r["run"] for r in rows] == ["whole", "split"]  # the stopped session wrote no row
+
+
+# Scaling fits
+
+def fake_row(d_model: int, lr: float, seed: int, bpb: float) -> dict:
+    """A results row for configs/baseline.json at this width, LR and seed, finishing at bpb."""
+    model_cfg, cfg = load_config(BASELINE, [f"model.d_model={d_model}", f"train.lr={lr}", f"train.seed={seed}"])
+    return {"run": f"d{d_model}-lr{lr:g}-s{seed}", "params": model_cfg.param_counts(), "val_bpb": bpb,
+            "config": {"model": dataclasses.asdict(model_cfg), "train": dataclasses.asdict(cfg)},
+            "curve": [{"flops": 1e14, "train_loss": 6.0, "val_bpb": bpb + 0.5},
+                      {"flops": 1e15, "train_loss": 5.0, "val_bpb": bpb}]}
+
+
+def test_lr_optimum_needs_a_bracketed_minimum():
+    lrs = [1e-3, 2e-3, 4e-3, 8e-3]
+    assert scaling.lr_optimum(lrs, [(math.log(lr / 3e-3)) ** 2 for lr in lrs]) == pytest.approx((3e-3, 0.0))
+    assert scaling.lr_optimum(lrs, [1.0, 2.0, 3.0, 4.0]) is None  # best at the edge
+    assert scaling.lr_optimum(lrs, [2.0, 1.0, float("nan"), 3.0]) is None  # a neighbour diverged
+
+
+def test_lr_sweep_recovers_the_power_law_and_seeds_give_the_spread(tmp_path):
+    rows = []
+    for d_model in (128, 256, 512):
+        n = load_config(BASELINE, [f"model.d_model={d_model}"])[0].param_counts()["non_embedding"]
+        lr_star = 0.1 * n**-0.5
+        for f in (0.3, 0.6, 1.2, 2.4, 4.8):  # off-grid optimum
+            rows.append(fake_row(d_model, lr_star * f, 0, 1.0 + math.log(f) ** 2))
+    rows += [fake_row(128, rows[2]["config"]["train"]["lr"], seed, rows[2]["val_bpb"] + delta)
+             for seed, delta in ((1, 0.01), (2, -0.01))]  # mean unchanged, std 0.01
+
+    result = scaling.lr_sweep(rows, tmp_path / "lr.png")
+    assert result["power_law"] == pytest.approx((0.1, -0.5))
+    assert [f["bpb_star"] for f in result["variants"]] == pytest.approx([1.0] * 3)
+    [spread] = scaling.seed_spread(rows)
+    assert (spread["seeds"], spread["std"]) == (3, pytest.approx(0.01))
+    scaling.plot_curves(rows[:3], tmp_path / "curves.png")
+    assert (tmp_path / "lr.png").stat().st_size > 0 and (tmp_path / "curves.png").stat().st_size > 0

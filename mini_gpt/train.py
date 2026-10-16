@@ -254,9 +254,14 @@ def train(
             last_ckpt = time.time()
             mark, since_mark = time.perf_counter(), 0
 
+    tflops = state["timed_tokens"] * fpt / state["timed_s"] / 1e12 if state["timed_s"] else None
+    peak_mem_gb = torch.cuda.max_memory_allocated(dev) / 2**30 if dev.type == "cuda" else None
     if step < steps:
         save_ckpt()
         print(f"stopped at step {step}; rerun to resume")
+        if dev.type == "cuda":
+            print(f"peak mem {peak_mem_gb:.2f} GB allocated, "
+                  f"{torch.cuda.max_memory_reserved(dev) / 2**30:.2f} GB reserved; {tflops or 0:.1f} TFLOP/s")
         return None
 
     row = {
@@ -271,8 +276,8 @@ def train(
         "steps": steps,
         "params": params,
         "val_bpb": state["curve"][-1]["val_bpb"],
-        "tflops": state["timed_tokens"] * fpt / state["timed_s"] / 1e12 if state["timed_s"] else None,
-        "peak_mem_gb": torch.cuda.max_memory_allocated(dev) / 2**30 if dev.type == "cuda" else None,
+        "tflops": tflops,
+        "peak_mem_gb": peak_mem_gb,
         "device": torch.cuda.get_device_name(dev) if dev.type == "cuda" else "cpu",
         "curve": state["curve"],
     }

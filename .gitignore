@@ -6,3 +6,6 @@ venv/
 out/
 /data/
 *.egg-info/
+/PLAN.md
+/ABLATIONS.pdf
+/DESIGN.pdf
