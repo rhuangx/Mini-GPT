@@ -56,19 +56,19 @@ def variants(rows: list[dict], drop: tuple[str, ...]) -> dict[str, list[dict]]:
     return dict(sorted(groups.items(), key=lambda g: (g[1][0]["params"]["non_embedding"], g[0])))
 
 
-def lr_optimum(lrs: list[float], bpbs: list[float]) -> tuple[float, float] | None:
-    """(LR*, bpb*): the vertex of a parabola in log LR through the best point and its two neighbours.
+def lr_optimum(lrs: list[float], bpbs: list[float], tol: float) -> tuple[float, float] | None:
+    """(LR*, best bpb): LR* is the geometric middle of the LRs that finish within tol of the best bpb.
 
-    None when the best LR is at the edge of the sweep or a neighbour diverged: the optimum is not bracketed.
+    LR curves are flat-bottomed with a cliff on the high side, which throws a parabola fit far off.
+    None when that near-best band reaches an end of the sweep: the optimum is not bracketed.
     """
     order = np.argsort(lrs)
-    x, y = np.log(np.asarray(lrs, dtype=float)[order]), np.asarray(bpbs, dtype=float)[order]
-    i = int(np.argmin(np.where(np.isfinite(y), y, np.inf)))
-    if i == 0 or i == len(x) - 1 or not np.isfinite(y[i - 1 : i + 2]).all():
+    x, y = np.asarray(lrs, dtype=float)[order], np.asarray(bpbs, dtype=float)[order]
+    y = np.where(np.isfinite(y), y, np.inf)
+    near = np.flatnonzero(y <= y.min() + tol)
+    if near[0] == 0 or near[-1] == len(x) - 1:
         return None
-    a, b, c = np.polyfit(x[i - 1 : i + 2], y[i - 1 : i + 2], 2)
-    v = -b / (2 * a)
-    return float(np.exp(v)), float(a * v * v + b * v + c)
+    return float(np.sqrt(x[near[0]] * x[near[-1]])), float(y.min())
 
 
 def power_law(n: list[float], y: list[float]) -> tuple[float, float]:
@@ -98,7 +98,7 @@ def plot_curves(rows: list[dict], out: Path) -> None:
         fig.savefig(out)
 
 
-def lr_sweep(rows: list[dict], out: Path) -> dict:
+def lr_sweep(rows: list[dict], out: Path, tol: float) -> dict:
     """Final val bpb against LR per variant (seeds averaged), and LR* against non-embedding params."""
     groups = variants(rows, drop=("lr", "seed"))
     labels = names([json.loads(k) for k in groups])
@@ -115,12 +115,15 @@ def lr_sweep(rows: list[dict], out: Path) -> dict:
             lrs = sorted(by_lr)
             bpbs = [float(np.mean(by_lr[lr])) for lr in lrs]
             ax_lr.plot(lrs, bpbs, color=color, marker="o", label=label)
-            best = lr_optimum(lrs, bpbs)
+            best = lr_optimum(lrs, bpbs, tol)
             fits.append({"variant": label, "non_embedding": group[0]["params"]["non_embedding"],
                          "lrs": lrs, "bpbs": bpbs, "lr_star": best and best[0], "bpb_star": best and best[1]})
             if best:
                 ax_lr.plot(*best, color=color, marker="D", markersize=7)
-        ax_lr.set(xscale="log", xlabel="Peak learning rate", title="Final validation bpb (diamond: fitted LR*)")
+        ax_lr.set(xscale="log", xlabel="Peak learning rate", title="Final validation bpb (diamond: LR*)")
+        ticks = sorted({lr for f in fits for lr in f["lrs"]})
+        ax_lr.set_xticks(ticks, [f"{t:g}" for t in ticks])
+        ax_lr.set_xticks([], minor=True)
         if len(groups) > 1:
             ax_lr.legend()
 
@@ -139,6 +142,9 @@ def lr_sweep(rows: list[dict], out: Path) -> dict:
             ax_n.text(0.5, 0.5, "needs bracketed LR* at 2+ sizes", ha="center", transform=ax_n.transAxes,
                       color="#898781")
         ax_n.set(xscale="log", yscale="log", xlabel="Non-embedding parameters", title="LR* against model size")
+        sizes = sorted({f["non_embedding"] for f in fits})
+        ax_n.set_xticks(sizes, [f"{n / 1e6:.1f}M" for n in sizes])
+        ax_n.set_xticks([], minor=True)
         fig.savefig(out)
     return {"variants": fits, "power_law": law}
 
@@ -162,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--runs", default="*", help="glob over run names, e.g. 'd256-L4-*'")
     ap.add_argument("--results", default="results/runs.jsonl")
     ap.add_argument("--out", default=None, help="PNG path (default out/plots/<command>.png)")
+    ap.add_argument("--tol", type=float, default=0.0034,
+                    help="lr-sweep: LRs within this many bpb of the best count as near-best (2x the noise floor)")
     args = ap.parse_args(argv)
 
     rows = load_runs(args.results, args.runs)
@@ -172,9 +180,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "curves":
         plot_curves(rows, out)
     elif args.command == "lr-sweep":
-        result = lr_sweep(rows, out)
+        result = lr_sweep(rows, out, args.tol)
         for f in result["variants"]:
-            star = f"LR* {f['lr_star']:.3g} (bpb {f['bpb_star']:.4f})" if f["lr_star"] else "LR* not bracketed"
+            star = f"LR* {f['lr_star']:.3g} (best bpb {f['bpb_star']:.4f})" if f["lr_star"] else "LR* not bracketed"
             print(f"{f['variant']}: N={f['non_embedding']:,}  {star}")
             print("    " + "  ".join(f"{lr:g}:{b:.4f}" for lr, b in zip(f["lrs"], f["bpbs"], strict=True)))
         if result["power_law"]:

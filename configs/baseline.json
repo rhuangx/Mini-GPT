@@ -9,8 +9,8 @@
   },
   "train": {
     "flops": 1e15,
-    "batch_size": 16,
-    "micro_batch": 16,
+    "batch_size": 8,
+    "micro_batch": 8,
     "lr": 0.002,
     "warmup_steps": 100,
     "decay_frac": 0.2,

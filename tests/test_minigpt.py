@@ -191,11 +191,13 @@ def fake_row(d_model: int, lr: float, seed: int, bpb: float) -> dict:
                       {"flops": 1e15, "train_loss": 5.0, "val_bpb": bpb}]}
 
 
-def test_lr_optimum_needs_a_bracketed_minimum():
-    lrs = [1e-3, 2e-3, 4e-3, 8e-3]
-    assert scaling.lr_optimum(lrs, [(math.log(lr / 3e-3)) ** 2 for lr in lrs]) == pytest.approx((3e-3, 0.0))
-    assert scaling.lr_optimum(lrs, [1.0, 2.0, 3.0, 4.0]) is None  # best at the edge
-    assert scaling.lr_optimum(lrs, [2.0, 1.0, float("nan"), 3.0]) is None  # a neighbour diverged
+def test_lr_optimum_is_the_middle_of_the_near_best_band():
+    lrs = [5e-4, 1e-3, 2e-3, 4e-3, 8e-3]
+    bpbs = [1.4752, 1.4427, 1.4420, 1.4393, 1.7575]  # the 3.1M sweep: flat bottom, cliff at 8e-3
+    assert scaling.lr_optimum(lrs, bpbs, tol=0.005) == pytest.approx((2e-3, 1.4393))
+    assert scaling.lr_optimum(lrs, bpbs, tol=0.001) == pytest.approx((4e-3, 1.4393))
+    assert scaling.lr_optimum(lrs, [1.0, 2.0, 3.0, 4.0, 5.0], tol=0.005) is None  # best at the edge
+    assert scaling.lr_optimum(lrs, [2.0, 1.0, float("nan"), 3.0, 3.0], tol=0.005) == pytest.approx((1e-3, 1.0))
 
 
 def test_lr_sweep_recovers_the_power_law_and_seeds_give_the_spread(tmp_path):
@@ -203,12 +205,12 @@ def test_lr_sweep_recovers_the_power_law_and_seeds_give_the_spread(tmp_path):
     for d_model in (128, 256, 512):
         n = load_config(BASELINE, [f"model.d_model={d_model}"])[0].param_counts()["non_embedding"]
         lr_star = 0.1 * n**-0.5
-        for f in (0.3, 0.6, 1.2, 2.4, 4.8):  # off-grid optimum
+        for f in (0.25, 0.5, 1, 2, 4):
             rows.append(fake_row(d_model, lr_star * f, 0, 1.0 + math.log(f) ** 2))
     rows += [fake_row(128, rows[2]["config"]["train"]["lr"], seed, rows[2]["val_bpb"] + delta)
              for seed, delta in ((1, 0.01), (2, -0.01))]  # mean unchanged, std 0.01
 
-    result = scaling.lr_sweep(rows, tmp_path / "lr.png")
+    result = scaling.lr_sweep(rows, tmp_path / "lr.png", tol=0.005)
     assert result["power_law"] == pytest.approx((0.1, -0.5))
     assert [f["bpb_star"] for f in result["variants"]] == pytest.approx([1.0] * 3)
     [spread] = scaling.seed_spread(rows)
