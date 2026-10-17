@@ -1,4 +1,4 @@
-"""Checks ordered like the package: tokenizer, data, model, FLOPs, val bpb, resume, scaling fits."""
+"""Checks ordered like the package: tokenizer, data, model, FLOPs, val bpb, resume, scaling fits, sweep."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.flop_counter import FlopCounterMode
 
-from mini_gpt import data, scaling
+from mini_gpt import data, scaling, sweep
 from mini_gpt.flops import flops_per_token
 from mini_gpt.model import GPT, IGNORE_INDEX, GPTConfig
 from mini_gpt.tokenizer import Tokenizer
@@ -217,3 +217,47 @@ def test_lr_sweep_recovers_the_power_law_and_seeds_give_the_spread(tmp_path):
     assert (spread["seeds"], spread["std"]) == (3, pytest.approx(0.01))
     scaling.plot_curves(rows[:3], tmp_path / "curves.png")
     assert (tmp_path / "lr.png").stat().st_size > 0 and (tmp_path / "curves.png").stat().st_size > 0
+
+
+# Phase 2 sweep
+
+def test_sweep_brackets_each_budget_and_lowers_lr_past_20_tokens_per_param():
+    for budget in sweep.BUDGETS:
+        sizes = [r["non_embedding"] for r in sweep.runs(budget)]
+        assert sizes == sorted(sizes) and 5 <= len(sizes) <= 7
+        assert sizes[0] < sweep.n_star(budget) < sizes[-1]
+    n = 25_305_600
+    assert sweep.lr_for(n, 20 * n) == pytest.approx(63.35 * n**-0.674, rel=2e-3)
+    assert sweep.lr_for(n, 80 * n) == pytest.approx(sweep.lr_for(n, 20 * n) * 4**-0.25, rel=2e-3)
+    assert sweep.lr_for(n, 5 * n) == sweep.lr_for(n, 20 * n)
+
+
+def law_rows(budgets: list[float]) -> list[dict]:
+    """Results rows for the planned runs, with val bpb from a known law: 0.7 + 100 / N^0.35 + 100 / D^0.3."""
+    rows = []
+    for budget in budgets:
+        for r in sweep.runs(budget):
+            cfg = sweep.shape(r["d_model"], r["n_layers"])
+            rows.append({"run": f"d{r['d_model']}-L{r['n_layers']}-{budget:.0e}", "params": cfg.param_counts(),
+                         "config": {"model": {"d_model": r["d_model"], "n_layers": r["n_layers"]},
+                                    "train": {"flops": budget, "lr": r["lr"], "micro_batch": r["micro_batch"]}},
+                         "flops_per_token": flops_per_token(cfg), "tokens": r["tokens"],
+                         "val_bpb": 0.7 + 100 / r["non_embedding"] ** 0.35 + 100 / r["tokens"] ** 0.3})
+    return rows
+
+
+def test_planned_keeps_one_row_per_size_at_the_planned_lr():
+    rows = law_rows([1e16])
+    check = {**rows[0], "config": {**rows[0]["config"], "train": {**rows[0]["config"]["train"], "lr": 1.0}}}
+    assert len(sweep.planned(rows + [check])) == len(rows)
+
+
+def test_isoflop_fits_recover_a_known_law(tmp_path):
+    rows = law_rows([1e15, 1e16, 1e17])
+    result = scaling.isoflop(rows, "non_embedding", reps=5, inits=[(4, 0.3, 4, 0.3, -0.5)])
+    assert (result["fit"]["alpha"], result["fit"]["beta"]) == pytest.approx((0.35, 0.30), abs=1e-3)
+    # A parabola through asymmetric IsoFLOP curves biases approach 2 by ~0.02 even on exact data.
+    assert result["point"]["a2"] == pytest.approx(result["point"]["a3"], abs=0.03)
+    assert all(abs(h["predicted"] - h["observed"]) < 2e-3 for h in result["held_out"])
+    scaling.plot_isoflop(result, rows, "non_embedding", tmp_path / "isoflop.png")
+    assert (tmp_path / "isoflop.png").stat().st_size > 0
